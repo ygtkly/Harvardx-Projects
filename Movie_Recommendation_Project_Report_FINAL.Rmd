@@ -1,0 +1,588 @@
+---
+title: "Movie Recommendation System Project"
+author: "Yigit Kalyoncu"
+date: "12/15/2020"
+output:
+  pdf_document: default
+---
+
+OVERVIEW:
+
+The goal of this project is to develop a movie recommendation system model using the EDX data set provided by the course. 
+
+Upon completing the task, the RMSE would be calculated using the hold-out validation set, also created with the code provided by the course. 
+
+Since the EDX data set itself, and the corresponding training set created is quite large with approximately 7 million instances that involves tens of thousands of unique users, movies, and even hundreds of genres, exploring via straight-forward visualizations would not be so easy. 
+
+```{r Summary of Edx Data Set, echo=FALSE, message= F, warning=F}
+
+if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org")
+if(!require(caret)) install.packages("caret", repos = "http://cran.us.r-project.org")
+if(!require(data.table)) install.packages("data.table", repos = "http://cran.us.r-project.org")
+if(!require(stringr)) install.packages("stringr", repos = "http://cran.us.r-project.org")
+
+library(tidyverse)
+library(caret)
+library(data.table)
+library(stringr)
+
+# MovieLens 10M dataset:
+# https://grouplens.org/datasets/movielens/10m/
+# http://files.grouplens.org/datasets/movielens/ml-10m.zip
+
+dl <- tempfile()
+download.file("http://files.grouplens.org/datasets/movielens/ml-10m.zip", dl)
+
+ratings <- fread(text = gsub("::", "\t", readLines(unzip(dl, "ml-10M100K/ratings.dat"))),
+                 col.names = c("userId", "movieId", "rating", "timestamp"))
+
+movies <- str_split_fixed(readLines(unzip(dl, "ml-10M100K/movies.dat")), "\\::", 3)
+colnames(movies) <- c("movieId", "title", "genres")
+
+# if using R 3.6 or earlier:
+movies <- as.data.frame(movies) %>% mutate(movieId = as.numeric(levels(movieId))[movieId],
+                                           title = as.character(title),
+                                           genres = as.character(genres))
+
+
+movielens <- left_join(ratings, movies, by = "movieId")
+
+# Validation set will be 10% of MovieLens data
+set.seed(1, sample.kind="Rounding") # if using R 3.5 or earlier, use `set.seed(1)`
+test_index <- createDataPartition(y = movielens$rating, times = 1, p = 0.1, list = FALSE)
+edx <- movielens[-test_index,]
+temp <- movielens[test_index,]
+
+# Make sure userId and movieId in validation set are also in edx set
+validation <- temp %>% 
+  semi_join(edx, by = "movieId") %>%
+  semi_join(edx, by = "userId")
+
+# Add rows removed from validation set back into edx set
+removed <- anti_join(temp, validation)
+edx <- rbind(edx, removed)
+
+rm(dl, ratings, movies, test_index, temp, movielens, removed)
+
+#-------------------------------end of the provided code----------------------------------------------
+
+
+#creating test and training sets
+
+
+y <- edx$rating
+
+test.index <- createDataPartition(y, times = 1, p = 0.2, list = F)
+
+test.set <- edx[test.index, ]
+training.set <- edx[-test.index,]
+
+#removing users and movies that do not appear in the training set from the test set
+
+test.set <- test.set %>%
+  semi_join(training.set, by = 'movieId') %>%
+  semi_join(training.set, by = 'userId')
+
+
+#data exploration
+
+summary(training.set)
+
+training.set %>% summarize(movies =  n_distinct(movieId), users = n_distinct(userId), genres = n_distinct(genres))
+```
+So instead, it makes sense to take a more generalized and examplified approach to explore the data and come to conclusions. 
+
+Upon exploration of the data, average overall ratings, regularized movie effect, user effect, genre effect and year effect are used to predict the ratings for each user & movie pair in the data set. Penalty terms are calculated to minimize RMSE. Lambda penalty terms are tuned via 10 fold cross validation. 
+
+Lastly, the final model is applied to the hold-out validation set, RMSE is calculated & results, performance, limitations and possible improvements are discussed.
+
+
+METHOD:
+
+  
+  PREPARATION AND EXPLORATION:
+
+The EDX data set consists of approximately 9 million instances with 6 variables. 
+Among the 6 variables, 3 appear to be usable when creating a model. These are userId, movieId & genre.
+
+In addition, there is 1 more hidden variable that is embedded within the title varible, which is the year of the movie. 
+This can also be used to create a model for predictions, once it is extracted from the title. 
+
+After exanining the data set broadly, training and test sets are created. 20% of the EDX data is used for the test set, and 80% is used for the training set. 
+Then users and movies that do not appear in the training set are removed from the test set to avoid NA's. 
+
+The overall mean rating for the training set is calculated in order to be used as a benchmark for further exploration.
+
+```{r Overall Mean Rating, echo=FALSE, message= F, warning=F}
+
+mu.train <- mean(training.set$rating)
+
+```
+
+Mean rating for movies with more than 100 ratings, and users with more than 80 ratings is calculated and plotted. The predictors are filtered as such since the result we get on more prominent users and movies would be reflective enough to make a generalization. 
+
+```{r Movie and User Effect, echo= F, message=F, warning=F}
+training.set %>% filter(n() > 100) %>% group_by(movieId) %>% summarize(avg.movie = mean(rating)) %>%
+  ggplot() + geom_histogram(aes(avg.movie), color = 'blue')
+
+#examining the user effect
+
+training.set %>% filter(n() > 80) %>% group_by(userId) %>% summarize(avg.user = mean(rating)) %>%
+  ggplot() + geom_histogram(aes(avg.user), color = 'red')
+
+```
+
+These plots indicate that there is indeed a movie and user effect for ratings, meaning certain movies  appear to be consistently rated with a certain way, and users also appear to rate movies with biases of their own. 
+
+To find out more about the genre effect, select genres are filtered and plotted as a boxplot. The mean rating for selected genres are also calculated. 
+The resulting boxplot and mean ratings vary enough to conclude that there is also a genre effect. The movies that belong to different genres tend to get different ratings overall. 
+
+```{r Genre Effect, echo= F, message=F, warning=F}
+
+training.set %>% filter(genres %in% c('Drama', 'Comedy', 'Horror', 'Sci-Fi', 'Thriller')) %>% 
+  group_by(genres) %>% 
+  ggplot(aes(x = genres, y = rating, color = genres)) + geom_boxplot()
+
+training.set %>% filter(genres %in% c('Drama', 'Comedy', 'Horror', 'Sci-Fi', 'Thriller')) %>% 
+  group_by(genres) %>% summarize(avg = mean(rating)) %>%
+  ggplot(aes(x = genres, y = avg, color = genres)) + geom_point()
+
+training.set %>% filter(genres %in% c('Drama', 'Comedy', 'Horror', 'Sci-Fi', 'Thriller')) %>% 
+  group_by(genres) %>% summarize(avg.rating = mean(rating)) %>% knitr::kable()
+
+```
+
+To examine the year effect, the years in which the movies were made are extracted from the title variable. 
+
+The code used to extract and modify the year predictor is shown below:
+
+```{r year train code, echo=T, message=F, warning=F}
+year.train <- training.set %>% mutate(year = str_extract(title, pattern =  "\\(\\d{4}\\)")) %>% 
+  mutate(year = str_remove(year, '\\(')) %>% 
+  mutate(year = str_remove(year, '\\)')) %>%
+  mutate(year = as.numeric(year))%>%
+  select(movieId,year) %>% distinct()
+
+```
+
+After the extraction, year effect is explored via first calculating average rating per year, and the examining the standard deviation, 
+minimum, median and maximum ratings among years.
+
+There seems to be note worthy difference between ratings among different years. Both standard deviation and variance are quite large. 
+
+```{r Year Effect, echo= F, message=F, warning=F}
+
+training.set %>% left_join(year.train, by = 'movieId') %>%
+  group_by(year) %>%
+  summarize(rt.by.year = mean(rating)) %>% summarize(mean.avg.years  = mean(rt.by.year),
+                                                    sd.avg.years = sd(rt.by.year),
+                                                    min.avg.years =  min(rt.by.year), 
+                                                    median.avg.years = median(rt.by.year), 
+                                                    max.avg.years = max(rt.by.year)) %>%
+  knitr::kable()
+
+```
+
+Anova test performed also supports the rating difference between years is significant since it yields a very low P-Value and high F-Value. 
+
+```{r anova year, echo=F, message=F, warning=F}
+year.edx <- edx %>% mutate(year = str_extract(title, pattern =  "\\(\\d{4}\\)")) %>% 
+  mutate(year = str_remove(year, '\\(')) %>% 
+  mutate(year = str_remove(year, '\\)')) %>%
+  mutate(year = as.numeric(year))%>%
+  select(movieId,year) %>% distinct()
+
+edx.with.year <- edx %>% left_join(year.edx, by='movieId') %>% mutate(year = as.factor(year))
+
+aov.test <- aov(rating ~ year, data = edx.with.year)
+summary(aov.test)
+
+```
+
+
+  MODEL AND APPROACH:
+
+The model proposed to predict ratings consist of overall mean rating as a base. Then movie effect, user effect, genre effect and year effect are calculated and added in order. 
+
+All effects are calculated using a penalization term to minimize the undesired effect of fringe data points. 
+
+Further, penalty terms for each effect are tuned in order achieve the lowest RMSE possible. The initial tuning was done using broader ranges and fewer points( This step is not included in the final code). Using the result of this initial tuning, final tuning was done in a more precise manner.
+
+To tune the penalty terms while avoiding overtraining, 10 fold cross validation is used. 
+The folds are created using the training set. 
+
+The coding approach used is similar for all effects:
+
+ - The overall average is deducted from the rating
+ - Observations are grouped by the effect being measured
+ - The penalty term is optimized based on the RMSE of the validation sets, and average of the penalty terms that result in lowest RMSE's are used
+ - The effects are calculated using the tuned penalty term
+ - The model is applied to the test set and rmse is obtained
+ - The next effect is calculated using the same steps, but also accounting for the effects that were calculated previously
+
+Code used for the movie effect calculations is show below:
+
+``` {r Model Creation and Tuning 1, echo= F, message=F, warning=F}
+
+mu.edx <- mean(edx$rating)
+
+#calculating training set overall average rating
+
+mu.train <- mean(training.set$rating)
+
+#calculating overall average model rmse for baseline
+
+overall.mean.model.rmse <- sqrt(mean((test.set$rating - mu.train)^2))
+
+#creating k-fold validation sets
+
+
+indexes <- createFolds(training.set$rating, k = 10)
+
+#tuning regularized movie effect
+
+```
+
+```{r movie effect, echo=T, message=F, warning=F}
+
+movie.effect.tuner <- seq(1, 3, 0.1)
+
+movie.tuner.rmses <- lapply(indexes, function(fold){
+  rmses <- sapply(movie.effect.tuner, function(lambda){
+    mu <- mean(training.set[-fold,]$rating)
+    summer <- training.set[-fold,] %>% 
+      group_by(movieId) %>%
+      summarize(sum = sum(rating - mu), rated = n())
+    predicted <- training.set[fold,] %>% 
+      semi_join(training.set[-fold,], by = 'movieId') %>%
+      left_join(summer, by = 'movieId') %>%
+      mutate(me = sum/(rated + lambda)) %>%
+      mutate(pred = mu + me) %>%
+      summarize(rmse = sqrt(mean((rating - pred)^2)))
+  })
+  return(movie.effect.tuner[which.min(rmses)])
+}) 
+
+#determining the best penalty term
+best.movie.tuner <- mean(as.numeric(movie.tuner.rmses))
+
+#calculating movie effect for the whole training set & test set
+
+tr.movie.effect <- training.set %>%
+  group_by(movieId) %>%
+  summarize(me = sum(rating - mu.train)/(n() + best.movie.tuner))
+
+edx.movie.effect <- edx %>%
+  group_by(movieId) %>%
+  summarize(me = sum(rating - mu.train)/(n() + best.movie.tuner))
+
+#calculating rmse on the test set
+
+movie.model.rmse <- test.set %>%
+  left_join(tr.movie.effect, by = 'movieId') %>%
+  mutate(predicted = mu.train + me) %>%
+  summarize(rmse.movie = sqrt(mean((rating - predicted)^2)))
+
+
+```
+
+```{r Model Creation and Tuning 2, echo= F, message=F, warning=F}
+#tuning regularized user effect
+
+user.effect.tuner <- seq(3.5, 6.5, 0.1)
+
+user.tuner.rmses <- lapply(indexes, function(fold){
+  rmses <- sapply(user.effect.tuner, function(lambda){
+    mu <- mean(training.set[-fold,]$rating)
+    summer <- training.set[-fold,] %>% 
+      left_join(tr.movie.effect, by = 'movieId') %>%
+      group_by(userId) %>%
+      summarize(sum = sum(rating - mu - me), rated = n())
+    predicted <- training.set[fold,] %>% 
+      semi_join(training.set[-fold,], by = 'movieId') %>%
+      left_join(tr.movie.effect, by = 'movieId') %>%
+      left_join(summer, by = 'userId') %>%
+      mutate(ue = sum/(rated + lambda)) %>%
+      mutate(pred = mu + me + ue) %>%
+      summarize(rmse = sqrt(mean((rating - pred)^2)))
+  })
+  
+  return(user.effect.tuner[which.min(rmses)])
+}) 
+
+#determining the best penalty term
+best.user.tuner <- mean(as.numeric(user.tuner.rmses))
+
+#calculating user effect for the whole training set & test set
+
+tr.user.effect <- training.set %>%
+  left_join(tr.movie.effect, by = 'movieId') %>%
+  group_by(userId) %>%
+  summarize(ue = sum(rating - mu.train - me)/(n() + best.user.tuner))
+
+edx.user.effect <- edx %>%
+  left_join(edx.movie.effect, by = 'movieId') %>%
+  group_by(userId) %>%
+  summarize(ue = sum(rating - mu.edx - me)/(n() + best.user.tuner))
+
+# calculating rmse on the test set
+
+movie.user.model.rmse <- test.set %>%
+  left_join(tr.movie.effect, by = 'movieId') %>%
+  left_join(tr.user.effect, by = 'userId') %>%
+  mutate(predicted = mu.train + me + ue) %>%
+  summarize(rmse.movie.user = sqrt(mean((rating - predicted)^2)))
+
+
+
+```
+
+```{r Model Creation and Tuning 3, echo= F, message=F, warning=F}
+
+#tuning regluarized genre effect
+
+genre.effect.tuner <- seq(500, 700, 10)
+
+genre.tuner.rmses <- lapply(indexes, function(fold){
+  rmses <- sapply(genre.effect.tuner, function(lambda){
+    mu <- mean(training.set[-fold,]$rating)
+    summer <- training.set[-fold,] %>% 
+      left_join(tr.movie.effect, by = 'movieId') %>%
+      left_join(tr.user.effect, by = 'userId') %>%
+      group_by(genres) %>%
+      summarize(sum = sum(rating - mu - me - ue), rated = n())
+    predicted <- training.set[fold,] %>% 
+      semi_join(training.set[-fold,], by = 'movieId') %>%
+      left_join(tr.movie.effect, by = 'movieId') %>%
+      left_join(tr.user.effect, by = 'userId') %>%
+      left_join(summer, by = 'genres') %>%
+      mutate(ge = sum/(rated + lambda)) %>%
+      mutate(pred = mu + me + ue + ge) %>%
+      summarize(rmse = sqrt(mean((rating - pred)^2)))
+  })
+  
+  return(user.effect.tuner[which.min(rmses)])
+}) 
+
+#determining the best penalty term
+best.genre.tuner <- mean(as.numeric(genre.tuner.rmses))
+
+#calculating genre effect for the whole training set & test set
+
+tr.genre.effect <- training.set %>%
+  left_join(tr.movie.effect, by = 'movieId') %>%
+  left_join(tr.user.effect, by = 'userId') %>%
+  group_by(genres) %>%
+  summarize(ge = sum(rating - mu.train - me - ue)/(n() + best.genre.tuner))
+
+edx.genre.effect <- edx %>%
+  left_join(edx.movie.effect, by = 'movieId') %>%
+  left_join(edx.user.effect, by = 'userId') %>%
+  group_by(genres) %>%
+  summarize(ge = sum(rating - mu.edx - me - ue)/(n() + best.genre.tuner))
+
+
+# calculating rmse on the test set
+
+movie.user.genre.model.rmse <- test.set %>%
+  left_join(tr.movie.effect, by = 'movieId') %>%
+  left_join(tr.user.effect, by = 'userId') %>%
+  left_join(tr.genre.effect, by = 'genres') %>%
+  mutate(predicted = mu.train + me + ue + ge) %>%
+  summarize(rmse.movie.user.genre = sqrt(mean((rating - predicted)^2)))
+
+```
+
+```{r Model Creation and Tuning 4, echo= F, message=F, warning=F}
+#extracting year from title for training set
+
+year.train <- training.set %>% mutate(year = str_extract(title, pattern =  "\\(\\d{4}\\)")) %>% 
+  mutate(year = str_remove(year, '\\(')) %>% 
+  mutate(year = str_remove(year, '\\)')) %>%
+  mutate(year = as.numeric(year))%>%
+  select(movieId,year) %>% distinct()
+
+#extracting year from title for test set
+
+year.test <- test.set %>% mutate(year = str_extract(title, pattern =  "\\(\\d{4}\\)")) %>% 
+  mutate(year = str_remove(year, '\\(')) %>% 
+  mutate(year = str_remove(year, '\\)')) %>%
+  mutate(year = as.numeric(year))%>%
+  select(movieId,year) %>% distinct()
+
+#extracting year from title for edx
+
+year.edx <- edx %>% mutate(year = str_extract(title, pattern =  "\\(\\d{4}\\)")) %>% 
+  mutate(year = str_remove(year, '\\(')) %>% 
+  mutate(year = str_remove(year, '\\)')) %>%
+  mutate(year = as.numeric(year))%>%
+  select(movieId,year) %>% distinct()
+
+#tuning regluarized year effect
+
+year.effect.tuner <- seq(0, 20, 1)
+
+year.tuner.rmses <- lapply(indexes, function(fold){
+  rmses <- sapply(year.effect.tuner, function(lambda){
+    mu <- mean(training.set[-fold,]$rating)
+    summer <- training.set[-fold,] %>% 
+      left_join(tr.movie.effect, by = 'movieId') %>%
+      left_join(tr.user.effect, by = 'userId') %>%
+      left_join(tr.genre.effect, by = 'genres') %>%
+      left_join(as.data.frame(year.train), by = 'movieId') %>%
+      group_by(year) %>%
+      summarize(sum = sum(rating - mu - me - ue - ge), rated = n())
+    predicted <- training.set[fold,] %>% 
+      semi_join(training.set[-fold,], by = 'movieId') %>%
+      left_join(tr.movie.effect, by = 'movieId') %>%
+      left_join(tr.user.effect, by = 'userId') %>%
+      left_join(tr.genre.effect, by = 'genres') %>%
+      left_join(as.data.frame(year.train), by = 'movieId') %>%
+      left_join(summer, by = 'year') %>%
+      mutate(ye = sum/(rated + lambda)) %>%
+      mutate(pred = mu + me + ue + ge+ ye) %>%
+      summarize(rmse = sqrt(mean((rating - pred)^2)))
+  })
+  
+  return(user.effect.tuner[which.min(rmses)])
+}) 
+
+#determining the best penalty term
+best.year.tuner <- mean(as.numeric(year.tuner.rmses))
+
+#calculating genre effect for the whole training set & test set
+
+tr.year.effect <- training.set %>%
+  left_join(tr.movie.effect, by = 'movieId') %>%
+  left_join(tr.user.effect, by = 'userId') %>%
+  left_join(tr.genre.effect, by = 'genres') %>%
+  left_join(year.train, by = 'movieId') %>%
+  group_by(year) %>%
+  summarize(ye = sum(rating - mu.train - me - ue - ge)/(n() + best.year.tuner))
+
+edx.year.effect <- edx %>%
+  left_join(edx.movie.effect, by = 'movieId') %>%
+  left_join(edx.user.effect, by = 'userId') %>%
+  left_join(edx.genre.effect, by = 'genres') %>%
+  left_join(year.edx, by = 'movieId') %>%
+  group_by(year) %>%
+  summarize(ye = sum(rating - mu.edx - me - ue - ge)/(n() + best.year.tuner))
+
+
+
+# calculating rmse on the test set
+
+movie.user.genre.year.model.rmse <- test.set %>%
+  left_join(tr.movie.effect, by = 'movieId') %>%
+  left_join(tr.user.effect, by = 'userId') %>%
+  left_join(tr.genre.effect, by = 'genres') %>%
+  left_join(year.test, by = 'movieId') %>%
+  left_join(tr.year.effect, by = 'year') %>%
+  mutate(predicted = mu.train + me + ue + ge + ye) %>%
+  summarize(rmse.movie.user.genre.year = sqrt(mean((rating - predicted)^2)))
+```
+ 
+RESULT:
+
+As became evident when the models were applied to the test set, the effect by movie and user seem to be the strongest, since they lower the RMSE most significantly. 
+
+Genre and year effects can be concluded to be weaker since the resulting change in RMSE is lower when they are added to the model.
+
+``` {r rmse result, echo= F, message=F, warning=F }
+
+rmse.by.model <- data.frame(rmse = c(overall.mean.model.rmse,
+                                     movie.model.rmse, 
+                                     movie.user.model.rmse, 
+                                     movie.user.genre.model.rmse, 
+                                     movie.user.genre.year.model.rmse))
+
+rmse.by.model <- rmse.by.model %>% matrix(nrow = 5)
+colnames(rmse.by.model) <- 'RMSE'
+rownames(rmse.by.model) <- c('Overall Mean Model', 
+                             'Reg. Movie Effect Model', 
+                             'Reg. Movie + User Effect Model', 
+                             'Reg. Movie + User + Genre Effect Model', 
+                             'Reg. Movie + User + Genre + Year Effect Model')
+
+rmse.by.model <- knitr::kable(rmse.by.model)
+
+rmse.by.model
+
+```
+
+The tuned penalty terms for each effect are listed below:
+
+```{r lambda results, echo=F, warning=F, message=F}
+
+
+lambda.by.effect <- matrix(c('Movie Effect',
+                             'User Effect', 
+                             'Genre Effect', 
+                             'Year Effect', 
+                             best.movie.tuner, 
+                             best.user.tuner, 
+                             best.genre.tuner, 
+                             best.year.tuner), nrow = 4)
+
+colnames(lambda.by.effect) <- c('Effect Type', 'Lambda')
+lambda.by.effect <- knitr::kable(lambda.by.effect)
+
+lambda.by.effect
+
+```
+
+On the validation set, due to a reason that was unable to be found, there were 8 rows films where the movie effect turned out to be NA. These rows were removed to calculate the RMSE for the final model.
+
+For the final validation, the model is created using the whole EDX data set to increase accuracy. 
+Since the final validation set still remains untouched, usage of the whole EDX data is believed to be appripriate and could not be considered overtraining. 
+(If the validation set did not exist, then using a model based on the total data set would most likely yield overtrained results.)
+
+The penalty terms thats were tuned with training validation sets are applied to corresponging predictors on EDX set, and the effect of the predictors are calculated. 
+
+Finally, the effects are added to the validation data set by predictor, and the final RMSE is obtained. 
+
+``` {r validation rmse, echo= F, message=F, warning=F }
+
+#extracting year for validation set
+
+year.validation <- validation %>% mutate(year = str_extract(title, pattern =  "\\(\\d{4}\\)")) %>% 
+  mutate(year = str_remove(year, '\\(')) %>% 
+  mutate(year = str_remove(year, '\\)')) %>%
+  mutate(year = as.numeric(year))%>%
+  select(movieId,year) %>% distinct()
+
+
+#calculating rmse for validation set - for final rmse, the model effects are calculated using the whole edx 
+#data set in order to improve accuracy. 
+
+validation.final.model.rmse <- validation %>%
+  left_join(year.validation, by = 'movieId') %>%
+  left_join(edx.movie.effect, by = 'movieId') %>%
+  left_join(edx.user.effect, by = 'userId') %>%
+  left_join(edx.genre.effect, by = 'genres') %>%
+  left_join(edx.year.effect, by = 'year') %>%
+  mutate(me = ifelse(is.na(me), 0, me)) %>%
+  mutate(predicted = mu.edx + me + ue + ge + ye) %>%
+  summarize(rmse.validation = sqrt(mean((rating - predicted)^2)))
+
+validation.final.model.rmse
+
+```
+
+The RMSE result of the validation test is lower than what was seen on the test set. 
+This is due to the fact that only training set was used for model that was tested on the test set. 
+
+However, since the final model is produced using the whole data set, the model became more accurate and yielded a notably improved result. 
+
+The general performance of the model is limited, although when the simple approach and the relatively short computing time is taken into account, it can still be considered a quite good and useful model. 
+
+
+CONCLUSION AND FURTHER ANALYSIS:
+
+As mentioned above, the model used is certainly one of the simplest approaches that can be taken, but still yields a satisfactory result. 
+
+The number of useful predictors in the given data is relatively small. This approach could have been extended to include further predictors (for example Age Group of the User, Country of the User, Budget of the Movie etc.), which could in return improve the predictions made. Given that this is a movie recommendation system, the company that requires the system would most likely have access to the data regarding the possible predictors given as exmaple, so it would not be a unrealistic idea to include them in the model. 
+
+In addition, more complex and time consuming approaches & models such as clustering, matrix factorization, k-nearest neighbors, or regression could almost certainly improve the results. 
+
+An ensemble of such models, used by averaging the predictions gained from each model would probably be the approach that produces the most refined result, and it could further be improved by getting a weighted average based on how much they improve the RMSE individually. 
