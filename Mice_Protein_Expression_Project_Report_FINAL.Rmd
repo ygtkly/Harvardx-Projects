@@ -1,0 +1,944 @@
+---
+title: "Predicting Classes via Protein Expression Levels"
+author: "Yigit Kalyoncu"
+date: "12/24/2020"
+output:
+  pdf_document: 
+    fig_crop: no
+    latex_engine: lualatex
+---
+
+```{r, include= F}
+options(tinytex.verbose = TRUE)
+```
+
+OVERVIEW:
+
+The purposes of this project is to produce machine learning algorithms that successfully predict the classification of an instance in data. 
+
+The data consists of expression levels of 77 proteins/protein modifications of mice as predictors. 
+There are 3 sub-classes; which are Genotype, Treatment Type & Behaviour, and one main class, called Class, which is the combination of the sub-classes. Ultimately, this is the class that is to be predicted.
+
+Since the computer that is used for this project has limited capability, a data set with fewer instances is chosen in order to make the computations required by some of the models feasible. 
+
+It is also important to note that, the project is not conducted with a thorough understanding of the biological aspects of the data used, but purely with a data analysis point of view. 
+Only the basic information provided by the source of the data is taken into account. 
+
+The following steps are taken in order to complete the task:
+
+- Data is loaded from an Url
+- Preliminary data exploration is performed
+- Data is cleaned and prepared based on the inital exploration
+- Further data exploration is performed and several vizualizations are created to better understand the data in hand, and to decide what methods are to be used
+- A model based on guessing is produced to be used as a benchmark
+- A total of 9 models in 3 main groups are produced and analyzed
+- A final ensemble model is created using the most successful models
+- The results are analyzed and discussed
+
+
+```{r Load Data, echo=FALSE, message= F, warning=F}
+if(!require(RCurl)) install.packages("RCurl", repos = "http://cran.us.r-project.org")
+if(!require(gdata)) install.packages("gdata", repos = "http://cran.us.r-project.org")
+if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org")
+if(!require(caret)) install.packages("caret", repos = "http://cran.us.r-project.org")
+if(!require(data.table)) install.packages("data.table", repos = "http://cran.us.r-project.org")
+if(!require(stringr)) install.packages("stringr", repos = "http://cran.us.r-project.org")
+if(!require(matrixStats)) install.packages("matrixStats", repos = "http://cran.us.r-project.org")
+if(!require(caretEnsemble)) install.packages("caretEnsemble", repos = "http://cran.us.r-project.org")
+if(!require(knitr)) install.packages("knitr", repos = "http://cran.us.r-project.org")
+if(!require(MVN)) install.packages("MVN", repos = "http://cran.us.r-project.org")
+if(!require(ggplot2)) install.packages("ggplot2", repos = "http://cran.us.r-project.org")
+
+
+library(plyr)
+library(tidyverse)
+library(dplyr)
+library(RCurl)
+library(gdata)
+library(matrixStats)
+library(caret)
+library(caretEnsemble)
+library(knitr)
+library(MVN)
+library(ggplot2)
+
+#downloading data
+
+url <- 'http://archive.ics.uci.edu/ml/machine-learning-databases/00342/Data_Cortex_Nuclear.xls'
+
+mice.data <- read.xls(url)
+
+```
+&nbsp;
+
+&nbsp;
+
+INTRODUCING THE DATA:
+
+The data is created using the tests performed on 72 mice. 15 measurements per mouse were performed, which yielded a total of 1080 instances. For the purposes of this project, each instance is considered an independent sample. 
+
+Upon examining the structure of the data below, it is understood that there are a total of 82 variables. 
+
+MouseID is a factor with 1080 levels. It is the a unique Id given to each sample. 
+
+Genotype is a factor with 2 levels, Control and Ts65Dn(Trisomic).
+Treatment is a factor with 2 levels, Memantine and Saline.
+Behaviour is a factor with 2 levels, C/S (Context-Shock) and S/C (Shock-Context).
+
+Class is a factor with 8 levels, whics is the combination of the 3 factors with 2 levels. 
+
+The other 77 variables are numeric variables, representing expression levels of the named proteins.
+
+The 77 numeric variables are used as predictors, and the Class is the main class that is to be predicted. 
+Genotype, Treatment and Behaviour are still used for exploratory purposes. 
+
+```{r Data Introduction, echo=F, warning=F, message=F}
+#examining data
+
+str(mice.data)
+```
+&nbsp;
+
+&nbsp;
+
+
+PRELIMINARY DATA EXPLORATION:
+
+Upon examining the proportions of each class, it can be seen that the number of classes are more or less evenly distributed, which means that there is no considerable difference in class prevelance in the sample population. 
+&nbsp;
+
+```{r Pre Data Exploration, echo=F, warning=F, message=F}
+
+prop.table(table(mice.data$class))
+
+```
+&nbsp;
+
+It is also seen that some of the predictor variables have a considerable amount of NA's as reported below.
+&nbsp;
+
+```{r Nas, echo=F, warning=F, message=F}
+
+mice.data %>% dplyr::summarize(across(DYRK1A_N :CaNA_N, ~ sum(is.na(.x))))
+
+```
+&nbsp;
+
+Specifically, the below predictors have more than 50 NA's each.
+&nbsp;
+
+```{r Nas 2, echo=F, warning=F, message=F}
+
+na.cols <- mice.data %>% dplyr::summarize(across(DYRK1A_N :CaNA_N, ~ sum(is.na(.x))))
+names(na.cols)[na.cols > 50]
+
+
+```
+&nbsp;
+
+&nbsp;
+
+DATA CLEANING AND PREPARATION:
+
+Since there are NA's in almost 1/3 of the instances, removing the instances with NA's would be very costly in terms of information. 
+When the relatively small number of instances is also taken into account, this option does not seem very logical. 
+
+Visualization below reveals that the predictors with more than 50 NA's are not very good at distinguishing between classes. Only ERG1_N seems to partially seperate 2 classes. 
+
+Given this information, it would be reasonable to remove these predictors instead of removing the instances. 
+&nbsp;
+
+
+```{r Data Preperation 1, echo=F, warning=F, message=F}
+
+na.cols <- mice.data %>% dplyr::summarize(across(DYRK1A_N :CaNA_N, ~ sum(is.na(.x))))
+
+na.preds <- names(na.cols)[na.cols > 50]
+
+mice.data %>% gather(protein, level, "DYRK1A_N" :"CaNA_N") %>%
+  filter(protein %in% na.preds) %>%
+  ggplot(aes(class, level)) + 
+  geom_boxplot(aes(fill = class)) + 
+  facet_wrap(protein~., scales = 'free_y') + 
+  ggtitle('Class vs Level of Predictors with Many NAs')
+  
+#none of these predictors seem to distinguish well enough among classes
+#so it makes sense to remove them
+ 
+mice.data2 <- mice.data %>% select(-all_of(na.preds))
+```
+
+However, after these 6 prredictors are removed, there are still several predictors with fewer NA instances remaining. 
+
+In order to reach a decision regarding these NA's, the predictors are portioned into 3 groups, and their expression levels are visualized. 
+&nbsp;
+
+```{r Data Preperation 3, echo=F, warning=F, message=F, fig.width=6, fig.height=8, fig.align='center'}
+
+#portioning predictors for more readable visualizations
+
+pred1 <- names(mice.data2)[2:25]
+pred2 <- colnames(mice.data2)[26:48]
+pred3 <- colnames(mice.data2)[49:72]
+
+#examining values by protein
+
+mice.data2 %>% gather(protein, level, "DYRK1A_N" :"CaNA_N") %>%
+  filter(protein %in% pred1) %>%
+  ggplot(aes(protein, level)) + 
+  geom_boxplot() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  ggtitle('Protein vs Level - Group 1')
+
+```
+&nbsp;
+
+```{r Data Preperation 3a, echo=F, warning=F, message=F, fig.width=6, fig.height=8, fig.align='center'}
+mice.data2 %>% gather(protein, level, "DYRK1A_N" :"CaNA_N") %>%
+  filter(protein %in% pred2) %>%
+  ggplot(aes(protein, level)) + 
+  geom_boxplot() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  ggtitle('Protein vs Level - Group 2')
+
+```
+&nbsp;
+
+```{r Data Preperation 3b, echo=F, warning=F, message=F, fig.width=6, fig.height=8, fig.align='center'}
+
+mice.data2 %>% gather(protein, level, "DYRK1A_N" :"CaNA_N") %>%
+  filter(protein %in% pred3) %>%
+  ggplot(aes(protein, level)) + 
+  geom_boxplot() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) + 
+  ggtitle('Protein vs Level - Group 3')
+
+```
+&nbsp;
+
+Upon examining these visuzalizations, it is seen that there are a large number values that lie far outside of the 2nd and 3rd quartiles for each predictor. 
+
+Due to significant number of values that are far from the median, it is sensible to use median imputation to get rid of the NA's.
+The mean imputation is not preffered since mean would influenced more by the fringe values, hence could deviate the original data.
+
+```{r Data Preperation 4, echo=T, warning=F, message=F}
+
+mice.data.final <- mice.data2 %>% group_by(class) %>%
+  dplyr::mutate(across(DYRK1A_N: CaNA_N, ~ ifelse(is.na(.x), median(., na.rm = T), .x))) %>%
+  ungroup() %>%
+  as.data.frame()
+
+```
+
+After the median imputation is implemented, the data set predictors are checked once again, and it is confirmed that there are no more NA's remaining. 
+
+Next, a training set and a test set are created. 
+
+Due to the small number of instances in the data set, commonly used 10% to 20% allocation for the test set would not be sufficient. 
+While there would be good amount of data for training, not having adequate data to test the models could cause the models to seem more accurate then they actually are. 
+
+Therefore, a division of 60% to 40% is used to create the training and test sets respectively. 
+
+In addition, matrices with predictor values for training and test sets are created.
+
+```{r Data Preperation 6, echo=T, warning=F, message=F}
+
+set.seed(1986, sample.kind = 'Rounding')
+
+y <- mice.data.final$class
+
+test.index <- createDataPartition(y, times = 1, p = 0.4, list = F)
+
+test.set <- mice.data.final[test.index,]
+
+training.set <- mice.data.final[-test.index,]
+
+test.set.preds <- test.set %>% 
+  select(-Behavior, -Genotype, -Treatment, -class, -MouseID) %>% as.matrix()
+
+training.set.preds <- training.set %>% 
+  select(-Behavior, -Genotype, -Treatment, -class, -MouseID) %>% as.matrix()
+
+
+```
+&nbsp;
+
+&nbsp;
+
+EXPLORATION OF THE CLEANED AND PREPARED TRAINING SET DATA:
+
+To gain a more in depth idea about the data in hand, which would be helpful in deciding on the methods that are to be used, more exploration is necessary. 
+
+Initially the standard deviations and variances of the predictors are calculated and examined. 
+&nbsp;
+
+```{r Data Exploration 1, echo=F, warning=F, message=F}
+
+#calculating standard deviations and variance of predictors
+sds <- colSds(training.set.preds, na.rm = T)
+variances <- colVars(training.set.preds, na.rm = T)
+
+```
+
+```{r Data Exploration 2, echo=T, warning=F, message=F}
+
+min(sds)
+max(sds)
+
+min(variances)
+max(variances)
+
+```
+&nbsp;
+
+As seen above, there is high variability among standard deviation and variance values of predictors. 
+
+Under these circumstances, applying standardization would be wise if principal component anaylsis is to be performed. 
+Otherwise principal components could be dominated by certain predictors. 
+
+Next, it is checked whether there a predictors with near zero variance. If there are, it would be advisable to remove them since they would not be helpful in predicting classes. 
+&nbsp;
+
+```{r Data Exploration 3, echo=T, warning=F, message=F}
+nzv <- nearZeroVar(training.set.preds)
+
+nzv
+
+```
+&nbsp;
+
+It appears there are not predictors with near zero variance. Based on this result, it is not possible to remove predictors at this point. 
+
+To investiage if there are any predictors that are correlated, a correlation matrix is produced. 
+
+The diagonal and lower triangle of the matrix are assigned zero values in order to avoid overestimating the number of highly correlated predictors. 
+
+Then the percentage of predictor pairs whose correlation coefficients are higher than 0.90, 0.70 and 0.50 are calculated. 
+Both negative and positive correlation is taken into account. 
+&nbsp;
+
+```{r Data Exploration 4, echo=F, warning=F, message=F}
+
+cor.mat <- cor(training.set.preds)
+
+diag(cor.mat) <- 0
+
+cor.mat[lower.tri(cor.mat)] <- 0
+
+very.high.correlation.per <- (sum(cor.mat > 0.9 | cor.mat < -0.9))/(71*71)
+names(very.high.correlation.per) <- 'Very High Correlation %'
+high.correlation.per <- (sum(cor.mat > 0.7 | cor.mat < -0.7))/(71*71)
+names(high.correlation.per) <- 'High Correlation %'
+moderate.correlation.per <- (sum(cor.mat > 0.5 | cor.mat < -0.5))/(71*71)
+names(moderate.correlation.per) <- 'Moderate Correlation %'
+
+knitr::kable(c(very.high.correlation.per, high.correlation.per, moderate.correlation.per))
+
+```
+&nbsp;
+
+It is seen that the highly correlated predictor pairs amount to about 2% of total pairs, and moderately correlated pairs amount to about %7. 
+
+This indicates that multicollinearity is not a significant issue, and predictors are independent for the most part. 
+
+In order to check if the variables are multivariate normal, MVN package is utilized Doornik-Hansen tests are implemented. 
+The results below show that variables are not multivariate normal.
+&nbsp;
+
+```{r multivariate normality, echo=F, warning=F, message=F}
+
+mvn.test.dh <- mvn(training.set.preds, mvnTest = 'dh')
+knitr::kable(mvn.test.dh$multivariateNormality)
+```
+&nbsp;
+
+To visualize the prediction capability of predictors, a tidy data frame is created.
+
+```{r Data Exploration 5, echo=T, warning=F, message=F}
+
+#gathering the predictors for analysis
+proteins.gather <- training.set %>% 
+  gather(protein, level, "DYRK1A_N" :"CaNA_N")
+
+```
+
+The aim of the following plots is to see whether any of the predictors distinguish between classes. 
+Since class "Class" has 8 factors and consists of the combination of 3 classes that have 2 factors each, these sub-classes are utilized in the plots to simplify the analysis. 
+
+Furthermore, instead of visualizing all predictors and once, the 3 groups of predictors that were created before are used once again for simplification and readability purposes. 
+
+The first 3 plots are created to see if any predictors distinguish between 2 Genotypes are below. 
+&nbsp;
+
+```{r Data Exploration 6, echo=F, warning=F, message=F, fig.align= 'center', fig.width= 7,fig.height= 8}
+
+proteins.gather %>% filter(protein %in% pred1) %>% 
+  ggplot(aes(Genotype, level)) + 
+  geom_boxplot(aes(fill = Genotype)) + 
+  facet_wrap(protein~., scales = 'free_y') + 
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  ggtitle(' Genotype Distinguishing Predictors Group 1')
+
+```
+&nbsp;
+
+```{r Data Exploration 6a, echo=F, warning=F, message=F, fig.align= 'center', fig.width=7, fig.height=8}
+proteins.gather %>% filter(protein %in% pred2) %>% 
+  ggplot(aes(Genotype, level)) + 
+  geom_boxplot(aes(fill = Genotype)) + 
+  facet_wrap(protein~., scales = 'free_y') + 
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  ggtitle(' Genotype Distinguishing Predictors Group 2')
+```
+&nbsp;
+
+```{r Data Exploration 6b, echo=F, warning=F, message=F, fig.align= 'center', fig.width=7, fig.height=8}
+proteins.gather %>% filter(protein %in% pred3) %>% 
+  ggplot(aes(Genotype, level)) + 
+  geom_boxplot(aes(fill = Genotype)) + 
+  facet_wrap(protein~., scales = 'free_y') + 
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  ggtitle('Genotype Distinguishing Predictors Group 3')
+
+```
+&nbsp;
+
+It appears BRAF_N , pELK_N and p_ERK_N in group 1 & APP_N, DSCR1_N and MTOR_N, PMTOR_N in group 2 could be useful in differentiating Genotype. 
+
+The next 3 plots are created to see if any predictors distinguish between 2 types of Treatment are below. 
+&nbsp;
+
+```{r Data Exploration 7, echo=F, warning=F, message=F, fig.align='center', fig.width=7, fig.height=8}
+
+
+proteins.gather %>% filter(protein %in% pred1) %>% 
+  ggplot(aes(Treatment, level)) + 
+  geom_boxplot(aes(fill = Treatment)) +
+  facet_wrap(protein~., scales = 'free_y') +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  ggtitle('Treatment Distinguishing Predictors Group 1')
+
+```
+&nbsp;
+
+```{r Data Exploration 7a, echo=F, warning=F, message=F, fig.align='center', fig.width=7, fig.height=8}
+
+proteins.gather %>% filter(protein %in% pred2) %>% 
+  ggplot(aes(Treatment, level)) + 
+  geom_boxplot(aes(fill = Treatment)) +
+  facet_wrap(protein~., scales = 'free_y') +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  ggtitle('Treatment Distinguishing Predictors Group 2')
+```
+&nbsp;
+
+```{r Data Exploration 7b, echo=F, warning=F, message=F, fig.align='center', fig.width=7, fig.height=8}
+proteins.gather %>% filter(protein %in% pred3) %>% 
+  ggplot(aes(Treatment, level)) + 
+  geom_boxplot(aes(fill = Treatment)) +
+  facet_wrap(protein~., scales = 'free_y') + 
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  ggtitle('Treatment Distinguishing Predictors Group 3')
+
+```
+&nbsp;
+
+It appears again that BRAF_N , pELK_N and p_ERK_N in group 1 & pMTOR_N and pPKCG_N in group 2 could be useful in differentiating Treatment type. 
+
+The final set of plots are created to see if any predictors distinguish between 2 types of Behavior are below. 
+&nbsp;
+
+```{r Data Exploration 8, echo=F, warning=F, message=F, fig.align='center', fig.width=7, fig.height=8}
+
+
+proteins.gather %>% filter(protein %in% pred1) %>% 
+  ggplot(aes(Behavior, level)) + 
+  geom_boxplot(aes(fill = Behavior)) +
+  facet_wrap(.~protein, scales = 'free_y') +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  ggtitle('Behavior Distinguishing Predictors Group 1')
+
+```
+&nbsp;
+
+```{r Data Exploration 8a, echo=F, warning=F, message=F, fig.align='center', fig.width=7, fig.height=8}
+proteins.gather %>% filter(protein %in% pred2) %>% 
+  ggplot(aes(Behavior, level)) + 
+  geom_boxplot(aes(fill = Behavior)) +
+  facet_wrap(.~protein, scales = 'free_y') +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  ggtitle('Behavior Distinguishing Predictors Group 2')
+```
+&nbsp;
+
+```{r Data Exploration 8b, echo=F, warning=F, message=F, fig.align='center', fig.width=7, fig.height=8}
+proteins.gather %>% filter(protein %in% pred3) %>% 
+  ggplot(aes(Behavior, level)) + 
+  geom_boxplot(aes(fill = Behavior)) +
+  facet_wrap(.~protein, scales = 'free_y') +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  ggtitle('Behavior Distinguishing Predictors Group 3')
+
+#result CaNA_N best distinguieshes behavior in group 3
+
+```
+&nbsp;
+
+It is seen again that pERK_N, BRAF_N, DYRK1A_N in group 1, SOD1_N in group 2 & C aNA_N in group 3 could be useful in differentiating Treatment type.
+
+Overall, via these plots, it became evident that there a few common predictors that appear to successfully separate 3 sub-classes. In addition, there are other predictors that at least partially distinguish between the sub-classes. 
+Hence, with a proper model, it should be possible to predict the main class with a relatively high level of accuracy.
+&nbsp;
+
+&nbsp;
+
+
+METHOD & MODELS:
+&nbsp;
+
+Since this is a multiclass classification problem, the algorithms that are utilized are Classification Tree, KNN and Random Forest. 
+
+QDA is not be used for 2 reasons. First, the test results indicated that the variables are not multivariate normal. Second, due to few observations and large number of predictors, the parameter amount used for QDA would reach unpractical levels quickly. 
+
+5 main approaches are considered, yielding a total of 11 models. 
+
+1) Initially, a model that simple guesses is produced to be used as a benchmark. 
+
+2) Classification Tree, KNN and Random forest is implemented using manually chosen predictors that are deemed most useful upon analyzing the plots created previously. 
+
+3) Classification Tree, KNN and Random forest is implemented using all predictors in training set. 
+
+4) Dimension reduction via principal component analysis is performed, and using the principal components,  Classification Tree, KNN and Random forest is implemented. 
+
+&nbsp;
+
+&nbsp;
+
+APPROACH NO 1 - SIMPLY GUESSING:
+&nbsp;
+
+A simplistic model that predicts the classes purely by guessing is implemented. 
+The result from guessing model is considered a benchmark to evaluate the other models. 
+
+Sampling with replacement is used for the model mentioned, and the accuracy is reported below. 
+
+```{r method 1, echo=F, warning=F, message=F}
+
+#MODEL 1: GUESSING
+
+set.seed(1986, sample.kind = 'Rounding')
+
+guess.predicted <- sample(levels(test.set$class), length(test.index), replace = T) %>% 
+  factor(levels = levels(test.set$class))
+
+accuracy.guess <- mean(guess.predicted == test.set$class)
+
+accuracy.guess
+
+```
+
+Given that there are 8 classes to choose from, the resulting accuracy by guessing is reasonable. 
+&nbsp;
+
+APPROACH NO 2 - MANUAL SELECTION OF PREDICTORS:
+&nbsp;
+
+Upon investigating the plots that were produced to see if any predictors distinguish between sub-classes, some of the predictors were identified by eye to be more useful than others. 
+
+For this approach, only these predictors are used to create the 3 models listed previously. 
+
+The parameters for each model are tuned accordingly.
+
+The code is shown below. 
+
+```{r method 2a, echo=T, warning=F, message=F}
+
+#MODEL 2: CLASSIFICATION TREE WITH MANUAL PREDICTOR SELECTION
+
+
+chosen.predictors <- c('BRAF_N', 'pELK_N', 'pERK_N', 'APP_N', 'DSCR1_N', 'MTOR_N', 'pMTOR_N', 
+                       'DYRK1A_N', 'SOD1_N', 'CaNA_N')
+
+chosen.index <- which(colnames(training.set.preds) %in% chosen.predictors)
+
+training.chosen.predictors <- training.set.preds[,chosen.index]
+
+test.chosen.predictors <- test.set.preds[,chosen.index]
+
+set.seed(1986, sample.kind = 'Rounding')
+
+fit.manual.rpart <- train(training.chosen.predictors, training.set$class, 
+                      method = 'rpart', 
+                      tuneGrid = data.frame(cp = seq(0.0, 0.05, len = 40)))
+
+accuracy.manual.rpart <- mean(predict(fit.manual.rpart, test.chosen.predictors) == test.set$class)
+
+
+#MODEL 3:  K-NEAREST NEIGHBORS WITH MANUAL PREDICTOR SELECTION
+
+set.seed(1986, sample.kind = 'Rounding')
+
+fit.manual.knn <- train(training.chosen.predictors, training.set$class, 
+                 method = 'knn', 
+                 tuneGrid = data.frame(k = seq(2, 20, 1)))
+
+accuracy.manual.knn <- mean(predict(fit.manual.knn, test.chosen.predictors) == test.set$class)
+
+#MODEL 4: RANDOM FOREST WITH MANUAL PREDICTOR SELECTION
+
+set.seed(1986, sample.kind = 'Rounding')
+
+fit.manual.rf <-train(training.chosen.predictors, training.set$class,
+               method = 'rf', 
+               tuneGrid = data.frame(mtry = seq(1, 8, 1)), importance = T, ntree = 500)
+
+accuracy.manual.rf <- mean(predict(fit.manual.rf, test.chosen.predictors) == test.set$class)
+
+
+```
+&nbsp;
+
+APPROACH NO 3 - USING ALL PREDICTORS:
+&nbsp;
+
+In this straightforward approach, all predictors are used to create the 3 models. 
+The parameters for each model are tuned the same way they were tuned for the 2nd approach. 
+
+```{r method 3, echo = F, message = F, warning=F}
+
+#MODEL 5: CLASSIFICATION TREE WITH ALL PREDICTORS
+
+set.seed(1986, sample.kind = 'Rounding')
+
+fit.rpart <- train(training.set.preds, training.set$class, 
+                          method = 'rpart', 
+                          tuneGrid = data.frame(cp = seq(0.0, 0.05, len = 40)))
+
+accuracy.rpart <- mean(predict(fit.rpart, test.set.preds) == test.set$class)
+
+#MODEL 6:  K-NEAREST NEIGHBORS WITH ALL PREDICTORS
+
+set.seed(1986, sample.kind = 'Rounding')
+
+fit.knn <- train(training.set.preds, training.set$class, 
+                        method = 'knn', 
+                        tuneGrid = data.frame(k = seq(2, 20, 1)))
+
+accuracy.knn <- mean(predict(fit.knn, test.set.preds) == test.set$class)
+
+#MODEL 7: RANDOM FOREST WITH ALL PREDICTORS
+
+set.seed(1986, sample.kind = 'Rounding')
+
+fit.rf <-train(training.set.preds, training.set$class,
+                      method = 'rf', 
+                      tuneGrid = data.frame(mtry = seq(1, 8, 1)), 
+               importance = T, ntree = 500)
+
+accuracy.rf <- mean(predict(fit.rf, test.set.preds) == test.set$class)
+
+
+```
+&nbsp;
+
+APPROACH NO 4 - USING PRINCIPAL COMPONENTS AS PREDICTORS:
+&nbsp;
+
+For this approach, the predictor matrix of training set is scaled and PCA is performed using prcomp function. 
+To keep consistency of transformation, the test set is also scaled according to the columnn means and standard deviations of the training set. The scaled test set values will be used during prediction stage.
+
+The summary and the plot below shows that:
+80% of variability is explained at 9th principal component,
+90% of variability is explained at 18th principal component, 
+99% of variability is explained at 50th principal component. 
+
+&nbsp;
+
+```{r method 4a, echo = F, message = F, warning=F}
+
+
+standard.training.pred <- data.frame(scale(training.set.preds))
+
+standard.test.pred <- sweep(test.set.preds, 2, colMeans(training.set.preds))
+standard.test.pred <- sweep(standard.test.pred, 2, colSds(training.set.preds), FUN = '/')
+
+set.seed(1986, sample.kind = 'Rounding')
+```
+&nbsp;
+
+```{r method 4aa, echo = F, message = F, warning=F}
+#computing pca
+pca <- prcomp(standard.training.pred)
+
+summary(pca)
+```
+&nbsp;
+
+```{r method 4ab, echo = F, message = F, warning=F}
+
+var.explained <- cumsum(pca$sdev^2/sum(pca$sdev^2))
+plot(var.explained)
+abline(h = 1, col = 'red')
+
+```
+&nbsp;
+
+When the first 4 principal components are plotted against each other, they seem to partially separate between classes, but there are still a lot of overlapping points from different classes. This makes sense,since the first 4 PC's only explain approximately 60% of variability cumulatively. 
+&nbsp;
+
+```{r method 4b, echo=F, message=F, warning=F}
+
+# %100 variability is explained at around 50th principal component
+
+pcs <- data.frame(pca$x, class = training.set$class)
+```
+&nbsp;
+
+```{r method 4ba, echo=F, message=F, warning=F}
+pcs %>% ggplot(aes(PC1, PC2, color = class)) + geom_point() + ggtitle('PC1 vs PC2')
+```
+&nbsp;
+
+```{r method 4bb, echo=F, message=F, warning=F}
+pcs %>% ggplot(aes(PC2, PC3, color = class)) + geom_point() + ggtitle('PC2 vs PC3')
+```
+&nbsp;
+
+```{r method 4bc, echo=F, message=F, warning=F}
+pcs %>% ggplot(aes(PC3, PC4, color = class)) + geom_point() + ggtitle('Pc3 vs PC4')
+
+```
+&nbsp;
+
+Although from previous analysis of PC's, an understanding is obtained regarding how many PC's should be used for the models, number of PC's to be included is treated like a tuning parameter, and the number that yields the best accuracy is chosen to create the models. 
+
+Tuning of the model specific parameters are done the same way they were done in previous approaches. 
+
+The code for 3 models created using princical components is shown below. 
+```{r method 4c, echo=T, message=F, warning=F}
+pcas.included <- seq(2,71,1)
+
+set.seed(1986, sample.kind = 'Rounding')
+
+rpart.tune.pc <- function(pcn) {
+  fit.pca.rpart <- train(pca$x[, 1:pcn], training.set$class,
+                         method = 'rpart',
+                         tuneGrid = data.frame(cp = seq(0, 0.05, length = 40)))
+  return(caretEnsemble:: getMetric(fit.pca.rpart))
+}
+
+set.seed(1986, sample.kind = 'Rounding')
+
+rpart.pc.options <- sapply(X = pcas.included , FUN =  rpart.tune.pc)
+
+rpart.best.pc <- pcas.included[which.max(rpart.pc.options)]
+
+set.seed(1986, sample.kind = 'Rounding')
+
+fit.pca.rpart <- train(pca$x[, 1:rpart.best.pc], training.set$class,
+                       method = 'rpart',
+                       tuneGrid = data.frame(cp = seq(0, 0.05, length = 20)))
+
+accuracy.pca.rpart <- mean(predict(fit.pca.rpart, 
+                                   predict(pca, standard.test.pred)) == test.set$class)
+
+#MODEL 9 K-NEAREST NEIGHBORS WITH PCA
+
+set.seed(1986, sample.kind = 'Rounding')
+
+knn.tune.pc <- function(pcn) {
+  fit.pca.knn <- train(pca$x[, 1:pcn], training.set$class,
+                         method = 'knn',
+                         tuneGrid = data.frame(k = seq(2, 20, 2)))
+  return(caretEnsemble:: getMetric(fit.pca.knn))
+}
+
+
+set.seed(1986, sample.kind = 'Rounding')
+
+knn.pc.options <- sapply(X = pcas.included , FUN =  knn.tune.pc)
+
+knn.best.pc <- pcas.included[which.max(knn.pc.options)]
+
+set.seed(1986, sample.kind = 'Rounding')
+
+fit.pca.knn <- train(pca$x[, 1:knn.best.pc], training.set$class,
+                       method = 'knn',
+                       tuneGrid = data.frame(k = seq(2, 20, 2)))
+
+
+accuracy.pca.knn <- mean(predict(fit.pca.knn, 
+                                 predict(pca, standard.test.pred)) == test.set$class)
+
+#MODEL 10 RANDOM FOREST WITH PCA
+
+
+rf.tune.pc <- function(pcn) {
+  fit.pca.rf <- train(pca$x[, 1:pcn], training.set$class,
+                         method = 'rf',
+                         tuneGrid = data.frame(mtry = seq(1, 8, 1)), ntree = 100)
+  return(caretEnsemble:: getMetric(fit.pca.rf))
+}
+
+set.seed(1986, sample.kind = 'Rounding')
+
+rf.pc.options <- sapply(X = pcas.included , FUN =  rf.tune.pc)
+
+rf.best.pc <- pcas.included[which.max(rf.pc.options)]
+
+set.seed(1986, sample.kind = 'Rounding')
+
+fit.pca.rf <- train(pca$x[, 1:rf.best.pc], training.set$class,
+                     method = 'rf',
+                     tuneGrid = data.frame(mtry = seq(1, 8, 1)), 
+                    importance = T, ntree = 500)
+
+
+accuracy.pca.rf <- mean(predict(fit.pca.rf, predict(pca, standard.test.pred)) == test.set$class)
+
+```
+&nbsp;
+
+ANALYZING RESULTS & THE 5TH APPROACH - ENSEMBLE:
+
+For all classification models, the complexity parameter chosen by the function was 0. 
+This indicates that for best accuracy, the tree needed to branch out all the way
+
+For all KNN models, 2 was chosen as k, the number of neighbors. This was the smallest option in tuning data frame provided to the function.
+This is likely to result in overfitting. If additinal data were to be provided and the predictions using this data was required, the accuracy of KNN models would most likely decrease. 
+
+For Random Forest models, the mtry parameters chosen were 2, 6 and 2 in that order. 
+
+When the variable importances of the random forest model created with manually chosen predictors, and the one created with all predictors are compared, it is seen that only 6 of the predictors that were chosen manually are also in top 20 most important variables in the other model. 
+
+This indicates that choices for the 1st approach were not as good as they should've been. This is normal since human error is factor in the creating of models using a manual approach. 
+&nbsp;
+
+```{r importance, echo=F, message=F, warning=F}
+
+imp.manual.rf <- varImp(fit.manual.rf)
+
+imp.rf <- varImp(fit.rf)
+
+imp.manual.rf
+imp.rf
+
+```
+&nbsp;
+
+The accuracy for each model is showm below.
+&nbsp;
+
+```{r accuracy table, echo=F, message=F, warning=F}
+
+# ACCURACY BY MODEL TABLE
+
+accuracy.by.model <- data.frame(model = c('Guessing Model', 
+                             'Manual Cls. Tree Model', 
+                             'Manual KNN Model', 
+                             'Manual Random Forest Model', 
+                             'Regular Cls. Tree Model', 
+                             'Regular KNN Model',
+                             'Regular Random Forest Model', 
+                             'PCA Cls. Tree Model', 
+                             'PCA KNN Model', 
+                             'PCA Random Forest Model'))
+
+accuracy.by.model <- accuracy.by.model %>% mutate(accuracy =  c(accuracy.guess, 
+                                              accuracy.manual.rpart,
+                                              accuracy.manual.knn, 
+                                              accuracy.manual.rf, 
+                                              accuracy.rpart, 
+                                              accuracy.knn, 
+                                              accuracy.rf, 
+                                              accuracy.pca.rpart, 
+                                              accuracy.pca.knn, 
+                                              accuracy.pca.rf))
+
+accuracy.by.model <- accuracy.by.model %>% arrange(desc(accuracy)) %>% knitr::kable()
+
+accuracy.by.model
+
+```
+&nbsp;
+
+It is evident that the random forest models have the highest accuracy. The number of trees that were used for each forest was 500. The number was chosen to shorten the computing time. 
+If higher number of trees were used, the accuracy of these models may have improved. 
+
+The table also shows that KNN models have highest accuracy after Random Forest. 
+As noted before, since the number of neighbors were chosen as 2, the models are likely overfitted. 
+
+When we combine this with the limited number of instances in the test set, the accuracy of the KNN models is most likely an overestimate. 
+
+In fact, low number of instances most likely caused a somewhat higher accuracy to be achieved for all models. 
+This is why it must be noted that the resulting accuracies should be evaluated with some scepticism. 
+Had there been a higher number of instances avaiable in the data set, the accuracies yielded could have been accepted more confidently. 
+
+Nevertheless to improve the results further, an ensemble of 3 most accurate models are used. 
+The prediction is selected by popular vote. 
+
+The accuracy obtained by the ensemble model is shown below. 
+
+```{r ensemble, echo=F, warning=F, message=F}
+
+fit.ensemble <- data.frame(regular.rf = predict(fit.rf, test.set.preds),
+                           pca.rf = predict(fit.pca.rf, predict(pca, standard.test.pred)),
+                           pca.knn = predict(fit.pca.knn, predict(pca, standard.test.pred)))
+
+
+fit.ensemble <- fit.ensemble %>% mutate(ensemble.predicted = ifelse(regular.rf == pca.rf & regular.rf == pca.knn, as.character(regular.rf),
+                                                                    ifelse(regular.rf == pca.rf, as.character(regular.rf), 
+                                                                           ifelse(regular.rf == pca.knn, as.character(regular.rf), 
+                                                                                  as.character(pca.rf))))) %>%
+  mutate(ensemble.predicted = as.factor(ensemble.predicted)) %>%
+  mutate(test.y = test.set$class)
+
+#RESULT
+
+accuracy.ensemble = mean(fit.ensemble$ensemble.predicted == fit.ensemble$test.y)
+
+accuracy.ensemble
+
+```
+&nbsp;
+
+The ensemble by popular vote yields an almost perfect accuracy, which is higher that all of the individual models used to create the ensemble. 
+This shows the power of ensembles, and how utlizing several models can eliminate mistakes made by them individually. 
+
+However, this result too should not be accepted with full confidence since the accuracy may be lower if the model is tested on data with larger amount of observations. 
+
+&nbsp;
+
+CONCLUSION:
+
+In order to accomplish the task of predicting classes via the remaining 71 predictors in the training data set, several different approaches were employed and a total of 11 models were created. 
+
+The methodology employed in this work takes into account the limiations of computing power available, as well as the limitations posed by the relatively small number of instances. 
+
+Both of these limiations are clearly reflected on the models produced. 
+
+Reliability of all models tested could have been improved with the availability of more computing power and a data set with higher number of observations.
+This could have been achieved with usage of better cross validation, tuning and number of trees used in related models, as well as through better training due to increased number of observations. 
+
+Regardless of the limitations, if the final model was to be tested using new observations, it is believed that the it would yield a more than satisfactory result, even if the accuracy would be not be as high as what is indicated by the tests conducted in this work.  
+
+The results of this project could also be used to limit the number of protein levels tested, since it  provides a concrete result regaring which of the protein expressions could be used to identify among classes, and which ones would not be helpful at all. 
+This could possibly save both resources and time and render prospective laboratory test in this subject more productive. 
+
+&nbsp;
+
+&nbsp;
+
+&nbsp;
+
+&nbsp;
+
+&nbsp;
+
+&nbsp;
+
+REFERENCES:
+
+Higuera C, Gardiner KJ, Cios KJ (2015) Self-Organizing Feature Maps Identify Proteins Critical to Learning in a Mouse Model of Down Syndrome. PLoS ONE 10(6): e0129126
+
+Ahmed MM, Dhanasekaran AR, Block A, Tong S, Costa ACS, Stasko M, et al. (2015) Protein Dynamics Associated with Failed and Rescued Learning in the Ts65Dn Mouse Model of Down Syndrome. PLoS ONE 10(3): e0119491. 
